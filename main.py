@@ -2,7 +2,7 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from pydantic import BaseModel, Field, StrictStr
 from supabase_auth.errors import AuthApiError, AuthError
 
@@ -103,6 +103,32 @@ def login(body: Credentials):
     s = res.session
     return {"access_token": s.access_token, "refresh_token": s.refresh_token, "token_type": "bearer",
             "expires_in": s.expires_in, "expires_at": s.expires_at, "user": user_out(res.user)}
+
+
+# ---------------------------------------------------------------------------- public
+@app.get("/public/info", tags=["public"], summary="Public info, no token needed")
+def public_info():
+    return {"message": "Welcome stranger! This info is public."}
+
+
+# ---------------------------------------------------------------------------- protected
+UNAUTHORIZED = {"WWW-Authenticate": "Bearer"}  # tells the client which kind of credentials to send
+
+
+def extract_token(authorization: str | None) -> str:
+    """Pull <token> out of 'Authorization: Bearer <token>'. Anything else is a 401."""
+    scheme, _, token = (authorization or "").strip().partition(" ")
+    token = token.strip()
+    if scheme.lower() != "bearer" or not token or " " in token:
+        raise ApiError(401, "Access token required", UNAUTHORIZED)
+    return token
+
+
+@app.get("/protected/profile", tags=["protected"], summary="Your private profile",
+         responses=errors.responses(401))
+def profile(authorization: str | None = Header(default=None)):
+    extract_token(authorization)
+    return {"message": "Token received (not verified yet)"}
 
 
 if __name__ == "__main__":
