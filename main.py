@@ -141,5 +141,19 @@ def logout(user: CurrentUser = Depends(current_user)):
     return Response(status_code=204)
 
 
+# FastAPI lists a 422 on every route with a body, but our handler sends 400 instead. Keep the docs honest.
+def custom_openapi():
+    if app.openapi_schema is None:
+        schema = FastAPI.openapi(app)
+        for ops in schema["paths"].values():
+            for op in ops.values():
+                op.get("responses", {}).pop("422", None)
+        app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
+
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=int(os.environ.get("PORT", 8000)))

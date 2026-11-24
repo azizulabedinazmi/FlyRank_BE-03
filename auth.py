@@ -4,7 +4,8 @@ FastAPI runs it before the route body. If the token is missing or bad it raises 
 """
 from dataclasses import dataclass
 
-from fastapi import Header
+from fastapi import Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase_auth.errors import AuthApiError, AuthError
 
 from errors import ApiError
@@ -21,11 +22,17 @@ class CurrentUser:
     token: str  # kept so /auth/logout can end exactly this session
 
 
-def extract_token(authorization: str | None) -> str:
-    """Pull <token> out of 'Authorization: Bearer <token>'. Anything else is a 401."""
-    scheme, _, token = (authorization or "").strip().partition(" ")
-    token = token.strip()
-    if scheme.lower() != "bearer" or not token or " " in token:
+# HTTPBearer is what puts the "Authorize" padlock in Swagger UI and marks routes that use it as locked.
+# auto_error=False: it hands us None instead of raising its own 403, so every failure uses our 401 + JSON shape.
+bearer = HTTPBearer(auto_error=False, scheme_name="BearerAuth", bearerFormat="JWT",
+                    description="Paste the access_token from POST /auth/login (without the word Bearer).")
+
+
+def extract_token(creds: HTTPAuthorizationCredentials | None) -> str:
+    """HTTPBearer already split 'Authorization: Bearer <token>'. It returns None when the header is missing or
+    isn't Bearer. We still reject an empty token or one with spaces ('Bearer a b')."""
+    token = creds.credentials.strip() if creds else ""
+    if not token or " " in token:
         raise ApiError(401, "Access token required", UNAUTHORIZED)
     return token
 
@@ -44,8 +51,8 @@ def verify_token(token: str):
     return res.user
 
 
-def current_user(authorization: str | None = Header(default=None)) -> CurrentUser:
-    token = extract_token(authorization)
+def current_user(creds: HTTPAuthorizationCredentials | None = Security(bearer)) -> CurrentUser:
+    token = extract_token(creds)
     user = verify_token(token)
     created = user.created_at
     return CurrentUser(id=user.id, email=user.email, token=token,
