@@ -2,11 +2,12 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Header
+from fastapi import Depends, FastAPI, Response
 from pydantic import BaseModel, Field, StrictStr
 from supabase_auth.errors import AuthApiError, AuthError
 
 import errors
+from auth import UNAUTHORIZED, CurrentUser, current_user
 from errors import ApiError
 from supabase_client import SUPABASE_URL, check_connection, new_client
 
@@ -112,37 +113,32 @@ def public_info():
 
 
 # ---------------------------------------------------------------------------- protected
-UNAUTHORIZED = {"WWW-Authenticate": "Bearer"}  # tells the client which kind of credentials to send
+# Every route below takes `user: CurrentUser = Depends(current_user)`. The guard in auth.py runs first; the route
+# body only runs for a verified user. No route contains its own token-checking code.
+
+@app.get("/protected/profile", tags=["protected"], summary="Your private profile",
+         response_model=UserOut, responses=errors.responses(401, 503))
+def profile(user: CurrentUser = Depends(current_user)):
+    return {"id": user.id, "email": user.email, "created_at": user.created_at}
 
 
-def extract_token(authorization: str | None) -> str:
-    """Pull <token> out of 'Authorization: Bearer <token>'. Anything else is a 401."""
-    scheme, _, token = (authorization or "").strip().partition(" ")
-    token = token.strip()
-    if scheme.lower() != "bearer" or not token or " " in token:
-        raise ApiError(401, "Access token required", UNAUTHORIZED)
-    return token
+@app.get("/protected/dashboard", tags=["protected"], summary="A second protected route (same guard, no new auth code)",
+         responses=errors.responses(401, 503))
+def dashboard(user: CurrentUser = Depends(current_user)):
+    return {"message": f"Welcome to your dashboard, {user.email}!", "user_id": user.id}
 
 
-def verify_token(token: str):
-    """Ask Supabase whether this token is real. A network call, so the answer is trustworthy:
-    expired, tampered-with, signed-out or made-up tokens all come back as an error."""
+@app.post("/auth/logout", tags=["auth"], summary="End this session", status_code=204,
+          responses=errors.responses(401, 503))
+def logout(user: CurrentUser = Depends(current_user)):
+    """Ends the session this token belongs to. After this, Supabase rejects the same access token."""
     try:
-        res = new_client().auth.get_user(token)  # token is never empty here (see extract_token)
+        new_client().auth.admin.sign_out(user.token, scope="local")  # POST /auth/v1/logout with the user's JWT
     except AuthApiError:
         raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
     except AuthError as e:
         raise supabase_down(e)
-    if res is None or res.user is None:
-        raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
-    return res.user
-
-
-@app.get("/protected/profile", tags=["protected"], summary="Your private profile",
-         response_model=UserOut, responses=errors.responses(401, 503))
-def profile(authorization: str | None = Header(default=None)):
-    user = verify_token(extract_token(authorization))
-    return user_out(user)
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
