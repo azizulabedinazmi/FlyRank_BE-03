@@ -124,11 +124,25 @@ def extract_token(authorization: str | None) -> str:
     return token
 
 
+def verify_token(token: str):
+    """Ask Supabase whether this token is real. A network call, so the answer is trustworthy:
+    expired, tampered-with, signed-out or made-up tokens all come back as an error."""
+    try:
+        res = new_client().auth.get_user(token)  # token is never empty here (see extract_token)
+    except AuthApiError:
+        raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
+    except AuthError as e:
+        raise supabase_down(e)
+    if res is None or res.user is None:
+        raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
+    return res.user
+
+
 @app.get("/protected/profile", tags=["protected"], summary="Your private profile",
-         responses=errors.responses(401))
+         response_model=UserOut, responses=errors.responses(401, 503))
 def profile(authorization: str | None = Header(default=None)):
-    extract_token(authorization)
-    return {"message": "Token received (not verified yet)"}
+    user = verify_token(extract_token(authorization))
+    return user_out(user)
 
 
 if __name__ == "__main__":
