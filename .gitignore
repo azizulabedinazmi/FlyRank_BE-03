@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets: real Supabase keys live in .env (never committed); .env.example is the committed template
+.env
+.env.*
+!.env.example
