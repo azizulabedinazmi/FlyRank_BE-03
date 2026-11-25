@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import Depends, FastAPI, Request, Response
 from pydantic import BaseModel, Field, StrictStr
-from supabase_auth.errors import AuthApiError, AuthError
+from supabase_auth.errors import AuthError, AuthRetryableError
 
 import errors
 import ratelimit
@@ -77,14 +77,14 @@ def signup(body: Credentials):
     email, password = require_credentials(body)
     try:
         res = new_client().auth.sign_up({"email": email, "password": password})
-    except AuthApiError as e:
+    except AuthRetryableError as e:  # network failure or Supabase 5xx: not the caller's fault
+        raise supabase_down(e)
+    except AuthError as e:  # API errors *and* the SDK's own ones (e.g. AuthWeakPasswordError)
         if e.code in ("user_already_exists", "email_exists"):
             raise ApiError(409, "A user with this email already exists")
-        if e.status == 429:
+        if getattr(e, "status", None) == 429:
             raise ApiError(429, e.message)
         raise ApiError(400, e.message)  # weak password, invalid email format, signups disabled...
-    except AuthError as e:
-        raise supabase_down(e)
     return user_out(res.user)
 
 
@@ -98,15 +98,15 @@ def login(body: Credentials, request: Request):
         raise ApiError(429, "Too many failed login attempts. Try again later.", {"Retry-After": str(wait)})
     try:
         res = new_client().auth.sign_in_with_password({"email": email, "password": password})
-    except AuthApiError as e:
-        if e.status == 429:
+    except AuthRetryableError as e:
+        raise supabase_down(e)
+    except AuthError as e:
+        if getattr(e, "status", None) == 429:
             raise ApiError(429, e.message)
         ratelimit.record_failure(ip, email)
         if e.code == "email_not_confirmed":
             raise ApiError(401, "Email not confirmed")
         raise ApiError(401, "Invalid login credentials")
-    except AuthError as e:
-        raise supabase_down(e)
     ratelimit.reset(ip, email)
     return tokens_out(res)
 
@@ -124,10 +124,10 @@ def refresh(body: RefreshIn):
         raise ApiError(400, "refresh_token is required")
     try:
         res = new_client().auth.refresh_session(body.refresh_token.strip())
-    except AuthApiError:
-        raise ApiError(401, "Invalid or expired refresh token")
-    except AuthError as e:
+    except AuthRetryableError as e:
         raise supabase_down(e)
+    except AuthError:
+        raise ApiError(401, "Invalid or expired refresh token")
     return tokens_out(res)
 
 
@@ -173,10 +173,10 @@ def logout(user: CurrentUser = Depends(current_user)):
     """Ends the session this token belongs to. After this, Supabase rejects the same access token."""
     try:
         new_client().auth.admin.sign_out(user.token, scope="local")  # POST /auth/v1/logout with the user's JWT
-    except AuthApiError:
-        raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
-    except AuthError as e:
+    except AuthRetryableError as e:
         raise supabase_down(e)
+    except AuthError:
+        raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
     return Response(status_code=204)
 
 

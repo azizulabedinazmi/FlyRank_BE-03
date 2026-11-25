@@ -8,7 +8,7 @@ import os
 
 from fastapi import Depends, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from supabase_auth.errors import AuthApiError, AuthError
+from supabase_auth.errors import AuthError, AuthRetryableError
 
 from errors import ApiError
 from supabase_client import new_client
@@ -44,10 +44,10 @@ def verify_token(token: str):
     expired, tampered-with, signed-out or made-up tokens all come back as an error."""
     try:
         res = new_client().auth.get_user(token)  # token is never empty here (see extract_token)
-    except AuthApiError:
-        raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
-    except AuthError as e:
+    except AuthRetryableError as e:  # network failure / Supabase down: fail closed, but say why
         raise ApiError(503, f"Could not reach Supabase: {e.__class__.__name__}")
+    except AuthError:  # any other rejection of the token
+        raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
     if res is None or res.user is None:
         raise ApiError(401, "Invalid or expired token", UNAUTHORIZED)
     return res.user

@@ -1,8 +1,8 @@
-﻿Testing http://127.0.0.1:8000 as checkpoint-370a69574f@mailinator.com
+﻿Testing http://127.0.0.1:8000 as checkpoint-15842bd37d@mailinator.com
 
 | Check | Expected | Got | Body |
 |---|---|---|---|
-| 1 signup new user -> 201 | 201 | 201 PASS | `{"id": "a4517089-4441-4c71-a8e8-bdd39ddd26e3", "email": "checkpoint-370a69574f@m` |
+| 1 signup new user -> 201 | 201 | 201 PASS | `{"id": "dc6cb09f-174d-450a-8576-b065de3ada94", "email": "checkpoint-15842bd37d@m` |
 | 1 signup without password -> 400 | 400 | 400 PASS | `{"error": "email and password are required"}` |
 | 1 signup empty body -> 400 | 400 | 400 PASS | `{"error": "email and password are required"}` |
 | 1 login empty password -> 400 | 400 | 400 PASS | `{"error": "email and password are required"}` |
@@ -15,10 +15,10 @@
 | 2 profile, header raw token, no 'Bearer ' -> 401 | 401 | 401 PASS | `{"error": "Access token required"}` |
 | 2 profile, header 'Basic ...' -> 401 | 401 | 401 PASS | `{"error": "Access token required"}` |
 | 2 profile, header 'Bearer a b' -> 401 | 401 | 401 PASS | `{"error": "Access token required"}` |
-| 3 profile, valid token -> 200 + user | 200 | 200 PASS | `{"id": "a4517089-4441-4c71-a8e8-bdd39ddd26e3", "email": "checkpoint-370a69574f@m` |
+| 3 profile, valid token -> 200 + user | 200 | 200 PASS | `{"id": "dc6cb09f-174d-450a-8576-b065de3ada94", "email": "checkpoint-15842bd37d@m` |
 | 3 profile, one char changed -> 401 | 401 | 401 PASS | `{"error": "Invalid or expired token"}` |
 | 3 profile, garbage token -> 401 | 401 | 401 PASS | `{"error": "Invalid or expired token"}` |
-| 4 dashboard, valid token -> 200 | 200 | 200 PASS | `{"message": "Welcome to your dashboard, checkpoint-370a69574f@mailinator.com!", ` |
+| 4 dashboard, valid token -> 200 | 200 | 200 PASS | `{"message": "Welcome to your dashboard, checkpoint-15842bd37d@mailinator.com!", ` |
 | 4 dashboard, tampered token -> 401 | 401 | 401 PASS | `{"error": "Invalid or expired token"}` |
 | 4 dashboard, no token -> 401 | 401 | 401 PASS | `{"error": "Access token required"}` |
 | 4 logout, no token -> 401 | 401 | 401 PASS | `{"error": "Access token required"}` |
@@ -27,7 +27,7 @@
 | X refresh, no token -> 400 | 400 | 400 PASS | `{"error": "refresh_token is required"}` |
 | X refresh, bogus token -> 401 | 401 | 401 PASS | `{"error": "Invalid or expired refresh token"}` |
 | X refresh, real token -> 200 new access_token | 200 | 200 PASS | `{"keys": ["access_token", "expires_at", "expires_in", "refresh_token", "token_ty` |
-| X refreshed token works on profile -> 200 | 200 | 200 PASS | `{"id": "a4517089-4441-4c71-a8e8-bdd39ddd26e3", "email": "checkpoint-370a69574f@m` |
+| X refreshed token works on profile -> 200 | 200 | 200 PASS | `{"id": "dc6cb09f-174d-450a-8576-b065de3ada94", "email": "checkpoint-15842bd37d@m` |
 | 4 logout, valid token -> 204 | 204 | 204 PASS | `(empty)` |
 | 4 same token after logout -> 401 | 401 | 401 PASS | `{"error": "Invalid or expired token"}` |
 | X brute force: 5x401 then 429 (got [401, 401, 401, 401, 401, 429, 429]) | 429 | 429 PASS | `{"error": "Too many failed login attempts. Try again later."}` |
