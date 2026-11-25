@@ -4,7 +4,9 @@ FastAPI runs it before the route body. If the token is missing or bad it raises 
 """
 from dataclasses import dataclass
 
-from fastapi import Security
+import os
+
+from fastapi import Depends, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase_auth.errors import AuthApiError, AuthError
 
@@ -57,3 +59,13 @@ def current_user(creds: HTTPAuthorizationCredentials | None = Security(bearer)) 
     created = user.created_at
     return CurrentUser(id=user.id, email=user.email, token=token,
                        created_at=created.isoformat() if hasattr(created, "isoformat") else str(created))
+
+
+# Authorization on top of authentication: the same guard first proves who you are, then this checks what you may do.
+ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
+
+
+def require_admin(user: CurrentUser = Depends(current_user)) -> CurrentUser:
+    if (user.email or "").lower() not in ADMIN_EMAILS:
+        raise ApiError(403, "Admins only")
+    return user

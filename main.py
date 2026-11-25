@@ -2,12 +2,13 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import Depends, FastAPI, Response
+from fastapi import Depends, FastAPI, Request, Response
 from pydantic import BaseModel, Field, StrictStr
 from supabase_auth.errors import AuthApiError, AuthError
 
 import errors
-from auth import UNAUTHORIZED, CurrentUser, current_user
+import ratelimit
+from auth import UNAUTHORIZED, CurrentUser, current_user, require_admin
 from errors import ApiError
 from supabase_client import SUPABASE_URL, check_connection, new_client
 
@@ -89,18 +90,48 @@ def signup(body: Credentials):
 
 @app.post("/auth/login", tags=["auth"], summary="Log in and get an access token (JWT)",
           response_model=TokensOut, responses=errors.responses(400, 401, 429, 503))
-def login(body: Credentials):
+def login(body: Credentials, request: Request):
     email, password = require_credentials(body)
+    ip = request.client.host if request.client else "unknown"
+    wait = ratelimit.retry_after(ip, email)
+    if wait:  # checked before Supabase is even asked, so a brute-force script gets nothing
+        raise ApiError(429, "Too many failed login attempts. Try again later.", {"Retry-After": str(wait)})
     try:
         res = new_client().auth.sign_in_with_password({"email": email, "password": password})
     except AuthApiError as e:
         if e.status == 429:
             raise ApiError(429, e.message)
+        ratelimit.record_failure(ip, email)
         if e.code == "email_not_confirmed":
             raise ApiError(401, "Email not confirmed")
         raise ApiError(401, "Invalid login credentials")
     except AuthError as e:
         raise supabase_down(e)
+    ratelimit.reset(ip, email)
+    return tokens_out(res)
+
+
+class RefreshIn(BaseModel):
+    refresh_token: StrictStr | None = None
+
+
+@app.post("/auth/refresh", tags=["auth"], summary="Swap a refresh token for a new access token",
+          response_model=TokensOut, responses=errors.responses(400, 401, 503))
+def refresh(body: RefreshIn):
+    """Access tokens live one hour so a stolen one is useless soon; the refresh token gets a new one without
+    asking for the password again. Each refresh token works once: the response carries its replacement."""
+    if not (body.refresh_token or "").strip():
+        raise ApiError(400, "refresh_token is required")
+    try:
+        res = new_client().auth.refresh_session(body.refresh_token.strip())
+    except AuthApiError:
+        raise ApiError(401, "Invalid or expired refresh token")
+    except AuthError as e:
+        raise supabase_down(e)
+    return tokens_out(res)
+
+
+def tokens_out(res) -> dict:
     s = res.session
     return {"access_token": s.access_token, "refresh_token": s.refresh_token, "token_type": "bearer",
             "expires_in": s.expires_in, "expires_at": s.expires_at, "user": user_out(res.user)}
@@ -126,6 +157,14 @@ def profile(user: CurrentUser = Depends(current_user)):
          responses=errors.responses(401, 503))
 def dashboard(user: CurrentUser = Depends(current_user)):
     return {"message": f"Welcome to your dashboard, {user.email}!", "user_id": user.id}
+
+
+@app.get("/protected/admin", tags=["protected"], summary="Admins only (403 for everyone else)",
+         responses=errors.responses(401, 403, 503))
+def admin_area(user: CurrentUser = Depends(require_admin)):
+    """401 = "I don't know who you are" (no/bad token). 403 = "I know exactly who you are, and no."
+    Admins are the emails listed in ADMIN_EMAILS."""
+    return {"message": f"Hello admin {user.email}. Only admins can see this."}
 
 
 @app.post("/auth/logout", tags=["auth"], summary="End this session", status_code=204,
