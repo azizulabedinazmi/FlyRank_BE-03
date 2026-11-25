@@ -30,6 +30,7 @@
     <li><a href="#testing">Testing: 29 live checks</a></li>
     <li><a href="#extras">Extras: 403, refresh, rate limit, logout, JWT</a></li>
     <li><a href="#security">Security Decisions</a></li>
+    <li><a href="#ai-vs-me">AI vs Me (Stage 7)</a></li>
     <li><a href="#structure">Repository Structure</a></li>
     <li><a href="#about">About</a></li>
   </ol>
@@ -297,6 +298,115 @@ got `200 {"message": "Hello admin ..."}` while a normal user gets 403.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+## 🤖 AI vs Me (Stage 7) <a name="ai-vs-me"></a>
+
+After building the API by hand, I gave the same job to an AI (Claude, in a fresh session that saw only the prompt) and
+ran its code against the same Supabase project. Its code is kept apart in [`ai-version/`](ai-version/); my code
+wasn't changed by it, except for one bug fix of mine that its tests exposed (below).
+
+- [`PROMPT-v1.md`](ai-version/PROMPT-v1.md) and [`v1/`](ai-version/v1/): the first prompt and the code it produced
+- [`PROMPT-v2.md`](ai-version/PROMPT-v2.md) and [`v2/`](ai-version/v2/): the rematch
+- Same tests for all three: my live [`checkpoint.py`](checkpoint.py) and [`security_probe.py`](ai-version/security_probe.py)
+  (duplicate email, weak password, `WWW-Authenticate`, `BEARER` in capitals, `Bearer <tab>`, a forged `alg: none`
+  token, 7 wrong passwords in a row)
+- Results: `results-ai-v1.md`, `results-ai-v2.md`, `probe-mine.md`, `probe-ai-v1.md`, `probe-ai-v2.md`
+
+### Prompt (v1)
+
+```text
+Build me a small auth API in Python with FastAPI that uses Supabase Auth (the `supabase` PyPI package).
+
+- Read SUPABASE_URL and SUPABASE_KEY (the anon key) from a .env file with python-dotenv. Give me a .env.example.
+- Routes:
+  - POST /auth/signup  {email, password} -> 201 with the user. 400 if email or password is missing.
+  - POST /auth/login   {email, password} -> 200 with access_token and refresh_token. 400 if a field is missing,
+    401 {"error": "Invalid login credentials"} if Supabase rejects them.
+  - POST /auth/logout  needs "Authorization: Bearer <token>" -> 204.
+  - GET /public/info   no auth -> 200 {"message": "Welcome stranger! This info is public."}
+  - GET /protected/profile  needs the bearer token -> 200 with the user's id, email and created_at.
+  - GET /protected/dashboard  another protected route.
+- Missing token -> 401 {"error": "Access token required"}. Invalid or expired token -> 401
+  {"error": "Invalid or expired token"}. Verify tokens with supabase.auth.get_user(token).
+- Put the token check in one reusable FastAPI dependency used by all protected routes.
+- Use HTTPBearer so Swagger UI at /docs shows the Authorize button.
+- Errors are JSON with an "error" key.
+```
+
+### Results (all live against Supabase)
+
+| Check | Mine | AI v1 | AI v2 |
+|---|---|---|---|
+| Stage 1–4 checkpoints (signup, login, 6 malformed headers, valid/tampered/garbage token, dashboard, logout, token after logout) | 22/22 | **21/22** | 22/22 |
+| Extras (403 admin, refresh ×4, 429 brute force) | 7/7 | not built (not asked) | 7/7 |
+| Signup response | `id, email, created_at` | **the whole Supabase user: 26 fields** ❌ | `id, email, created_at` |
+| Existing email | 409 | **422** ❌ | 409 |
+| Weak password | 400 (after my fix, see below) | **422** ❌ | 400 |
+| 401 carries `WWW-Authenticate: Bearer` | yes | **no** | yes |
+| `BEARER <token>` / `Bearer <tab>` / forged `alg: none` token | 200 / 401 / 401 | 200 / 401 / 401 | 200 / 401 / 401 |
+| 7 wrong passwords in a row | 401 ×5, then 429 | **401 ×7, no limit** | 401 ×5, then 429 |
+| Code size (non-blank lines) | 287 in 5 modules | 201 in 1 file | 478 in 6 modules + 20 offline tests |
+
+### 1. Token extraction: did it handle the `"Bearer "` prefix?
+
+**Yes, both versions, safely.** Both used `HTTPBearer(auto_error=False)`, which splits the header on the first space and
+compares the scheme case-insensitively. So `Authorization: <token>` without the prefix, `Basic ...` and an empty
+`Bearer ` all became our own 401 `Access token required`, not a crash and not FastAPI's 403 `{"detail": ...}`.
+v1 also checked `not credentials.credentials` before calling Supabase, which matters (see the next section).
+The one difference: for `Bearer a b`, v1 says `Invalid or expired token` while mine says `Access token required`,
+since a token with a space in it isn't a token at all.
+
+### 2. Security: did it safely handle invalid tokens?
+
+- **Invalid tokens: safe.** It never trusted `get_user` blindly. It caught the error and returned 401, checked for a
+  `None` user, and mapped network failures to 503, so it fails **closed**. Tampered, garbage and forged `alg: none`
+  tokens all got 401. It never used the `service_role` key and never logged a token.
+- **The trap it stepped around:** `supabase.auth.get_user("")` falls back to the client's *stored session*. v1 used one
+  **shared** client for every `get_user` call, which is exactly the setup where that trap bites. It was safe only
+  because (a) it rejected empty tokens first and (b) that shared client never signed anyone in. One later "small
+  refactor" that logs in with the shared client would turn an empty `Bearer ` header into "you are the last user who
+  logged in". Mine and v2 use a fresh, session-less client per request, so there's no stored session to fall back to.
+- **It over-shared on signup.** It returned the full Supabase user object (26 fields: `identities`, `app_metadata`,
+  `confirmation_sent_at`, `role`, `action_link`...). That's not a token leak, but a public endpoint shouldn't hand
+  internal account state to whoever calls it.
+- **No brute-force protection.** Seven wrong passwords got seven 401s. Supabase has its own project-wide limits,
+  but nothing stopped one script hammering one account through this API.
+- **A wrong security comment.** v1's logout says the access token "stays valid until it expires". The live test
+  shows the opposite: after logout the same token gets 401, because `get_user` asks Supabase, which checks the token's
+  `session_id`. It wrote down what's true for *locally verified* JWTs without testing it.
+- **It caught a bug in mine.** Running the weak-password probe against all three showed **my** API answering
+  **503 "Could not reach Supabase: AuthWeakPasswordError"**. The SDK raises `AuthWeakPasswordError`, which is *not* an
+  `AuthApiError`, so my code treated it as "Supabase is down". v1 had the same root mistake, hidden by passing the status
+  through (422). I fixed mine (`Fix: weak password returned 503 instead of 400`): now only `AuthRetryableError`
+  (a real network failure) means 503.
+
+### 3. What my prompt missed, and what the AI assumed
+
+- **The response shape.** "201 with the user" was all I wrote, so it returned *all* of the user.
+- **Status codes beyond the happy path.** I listed 400 for *missing* fields but nothing for "already registered" or
+  "weak password", so it passed Supabase's 422 straight through. That contradicts its own (correct) choice of turning
+  FastAPI's 422 into 400.
+- **`WWW-Authenticate`, rate limiting, refresh and the admin route.** None were asked for, so none were built.
+- **Client lifetime.** I didn't say "one client per request", so it chose a shared client for verification. It was safe
+  today, but only by two coincidences.
+- **What it decided well on its own:** 503 instead of 401 when Supabase is unreachable, `admin.sign_out(token, "local")`
+  for logout (a plain `sign_out()` on a session-less client logs nobody out), and 400 instead of 422 for malformed JSON.
+
+### Rematch (v2)
+
+[`PROMPT-v2.md`](ai-version/PROMPT-v2.md) added: the exact signup shape, never 422 (409 for duplicates, 400 for weak
+passwords), `WWW-Authenticate`, a fresh client per request, refresh + admin + rate limit, and "after logout the same
+token must be rejected: test this, don't assume". **v2 passed 29/29 live and every probe.** It went further than mine
+in two places: it remembers a hash of logged-out tokens, so they're refused even if Supabase still accepted them, and it
+returns 409 when "Confirm email" is on and Supabase quietly hands back a fake user for an existing email. The cost was
+size: 478 lines across 6 modules against my 287.
+
+**Lesson:** v1 handled the security-critical parts (the Bearer prefix and invalid tokens) correctly, and still failed
+on everything I hadn't written down: response shape, error codes, rate limiting, and a comment that was wrong about how
+logout works. Running the same probes on all three versions also found a real bug in *my* code. Building it myself is
+what let me write those probes; running them on the AI's code is what pointed them back at mine.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
 ## 🗂️ Repository Structure <a name="structure"></a>
 
 | Path | Purpose |
@@ -308,6 +418,7 @@ got `200 {"message": "Hello admin ..."}` while a normal user gets 403.
 | `ratelimit.py` | Failed-login counter for the 429 extra. |
 | `checkpoint.py` | 29 live checks across Stages 1–4 and the extras. |
 | `docs/` | Swagger screenshots, the curl session and the checkpoint results. |
+| `ai-version/` | Stage 7: both AI versions, both prompts, the security probe and all results. |
 | `.env.example` | The variables to set (placeholders only). |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
